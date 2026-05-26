@@ -1,6 +1,9 @@
-const databaseName = 'handwrite-math-notebook';
+const databaseName = 'gemini-grading-notebook';
 const databaseVersion = 1;
-const storeName = 'notes';
+const stores = {
+  records: 'records',
+  usage: 'usage',
+};
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -13,9 +16,14 @@ function openDatabase() {
 
     request.onupgradeneeded = () => {
       const database = request.result;
-      if (!database.objectStoreNames.contains(storeName)) {
-        const store = database.createObjectStore(storeName, { keyPath: 'id' });
-        store.createIndex('updatedAt', 'updatedAt');
+
+      if (!database.objectStoreNames.contains(stores.records)) {
+        const records = database.createObjectStore(stores.records, { keyPath: 'id' });
+        records.createIndex('updatedAt', 'updatedAt');
+      }
+
+      if (!database.objectStoreNames.contains(stores.usage)) {
+        database.createObjectStore(stores.usage, { keyPath: 'usageDate' });
       }
     };
 
@@ -24,7 +32,7 @@ function openDatabase() {
   });
 }
 
-function runTransaction(mode, callback) {
+function runTransaction(storeName, mode, callback) {
   return openDatabase().then(
     (database) =>
       new Promise((resolve, reject) => {
@@ -43,15 +51,23 @@ function runTransaction(mode, callback) {
   );
 }
 
-export async function getAllNotes() {
-  const notes = await runTransaction('readonly', (store) => store.getAll());
-  return notes.sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
+export async function getAllRecords() {
+  const records = await runTransaction(stores.records, 'readonly', (store) => store.getAll());
+  return records.sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
 }
 
-export function saveNote(note) {
-  return runTransaction('readwrite', (store) => store.put(note));
+export function saveRecord(record) {
+  return runTransaction(stores.records, 'readwrite', (store) => store.put(record));
 }
 
-export function deleteNote(id) {
-  return runTransaction('readwrite', (store) => store.delete(id));
+export function deleteRecord(id) {
+  return runTransaction(stores.records, 'readwrite', (store) => store.delete(id));
+}
+
+export function getUsage(usageDate) {
+  return runTransaction(stores.usage, 'readonly', (store) => store.get(usageDate));
+}
+
+export function saveUsage(usage) {
+  return runTransaction(stores.usage, 'readwrite', (store) => store.put(usage));
 }

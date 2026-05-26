@@ -3,18 +3,37 @@ import { createRoot } from 'react-dom/client';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import './styles.css';
-import { deleteNote, getAllNotes, saveNote } from './storage.js';
+import { deleteRecord, getAllRecords, getUsage, saveRecord, saveUsage } from './storage.js';
+
+const timezoneBasis = 'America/Los_Angeles';
+const defaultDailyLimit = 50;
 
 const emptyDraft = () => ({
   id: crypto.randomUUID(),
   title: '',
-  formulaText: '',
-  answerText: '',
-  imageDataUrl: '',
+  questionText: '',
+  questionImageDataUrl: '',
+  questionImageName: '',
+  questionImageMimeType: '',
+  questionImageImportedAt: '',
+  modelAnswer: '',
+  rubricText: '',
+  maxScore: 10,
   strokes: [],
+  answerImageDataUrl: '',
+  gradingResult: null,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 });
+
+function getUsageDate() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezoneBasis,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
 
 function formatDate(value) {
   return new Intl.DateTimeFormat('ja-JP', {
@@ -25,10 +44,20 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
-function FormulaPreview({ formula }) {
+function imageDataUrlToPayload(dataUrl) {
+  if (!dataUrl) return null;
+  const [header, data] = dataUrl.split(',');
+  const match = header.match(/data:(.*?);base64/);
+  return {
+    mimeType: match?.[1] || 'image/png',
+    data,
+  };
+}
+
+function FormulaPreview({ formula, emptyText = 'LaTeXプレビュー' }) {
   const html = useMemo(() => {
-    if (!formula.trim()) {
-      return '<span class="preview-empty">LaTeXプレビュー</span>';
+    if (!formula?.trim()) {
+      return `<span class="preview-empty">${emptyText}</span>`;
     }
 
     return katex.renderToString(formula, {
@@ -36,9 +65,37 @@ function FormulaPreview({ formula }) {
       displayMode: true,
       strict: false,
     });
-  }, [formula]);
+  }, [emptyText, formula]);
 
   return <div className="formula-preview" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function UsageMeter({ usage, dailyLimit }) {
+  const used = usage?.successfulRequests || 0;
+  const limit = Math.max(1, Number(dailyLimit) || defaultDailyLimit);
+  const remaining = Math.max(0, limit - used);
+  const rate = Math.min(1, used / limit);
+  const degrees = Math.round(rate * 360);
+  const tone = rate >= 0.9 ? 'danger' : rate >= 0.8 ? 'warning' : 'normal';
+
+  return (
+    <section className={`usage-meter ${tone}`}>
+      <div
+        className="usage-ring"
+        style={{
+          background: `conic-gradient(var(--meter-color) ${degrees}deg, #e8ddcc ${degrees}deg)`,
+        }}
+        aria-label={`Gemini無料枠の使用目安 ${used}/${limit}`}
+      >
+        <span>{Math.round(rate * 100)}%</span>
+      </div>
+      <div>
+        <strong>Gemini無料枠</strong>
+        <p>{used} / {limit} 回</p>
+        <small>残り目安: {remaining}回 / RPD基準: 太平洋時間0:00</small>
+      </div>
+    </section>
+  );
 }
 
 function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
@@ -62,12 +119,8 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
       0,
       Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared),
     );
-    const projection = {
-      x: start.x + t * dx,
-      y: start.y + t * dy,
-    };
 
-    return Math.hypot(point.x - projection.x, point.y - projection.y);
+    return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy));
   };
 
   const strokeHitsEraser = (stroke, point, radius) => {
@@ -215,10 +268,7 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
 
   const continueDrawing = (event) => {
     event.preventDefault();
-    if (
-      multiTouchBlockedRef.current ||
-      event.pointerId !== activePointerIdRef.current
-    ) {
+    if (multiTouchBlockedRef.current || event.pointerId !== activePointerIdRef.current) {
       return;
     }
 
@@ -236,8 +286,7 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
 
     currentStrokeRef.current.points.push(point);
 
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+    const context = canvasRef.current.getContext('2d');
     const points = currentStrokeRef.current.points;
     const previous = points[points.length - 2];
 
@@ -285,7 +334,7 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
       <canvas
         ref={canvasRef}
         className={`drawing-canvas ${tool === 'eraser' ? 'is-eraser' : ''}`}
-        aria-label="手書き数式入力エリア"
+        aria-label="手書き答案入力エリア"
         onContextMenu={(event) => event.preventDefault()}
         onSelect={(event) => event.preventDefault()}
         onPointerDown={startDrawing}
@@ -309,312 +358,466 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
   );
 }
 
-function EditorView({ initialNote, onCancel, onSaved }) {
-  const [draft, setDraft] = useState(initialNote);
-  const [tool, setTool] = useState('pen');
-  const [penSize, setPenSize] = useState(4);
-  const [eraserSize, setEraserSize] = useState(34);
-  const [status, setStatus] = useState('');
-  const canvasHostRef = useRef(null);
+function QuestionPanel({ draft, updateDraft }) {
+  const fileInputRef = useRef(null);
 
-  const updateDraft = (field, value) => {
-    setDraft((current) => ({ ...current, [field]: value }));
+  const importImage = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('対応していない画像形式です。');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateDraft({
+        questionImageDataUrl: reader.result,
+        questionImageName: file.name,
+        questionImageMimeType: file.type,
+        questionImageImportedAt: new Date().toISOString(),
+      });
+    };
+    reader.onerror = () => alert('画像を読み込めませんでした。');
+    reader.readAsDataURL(file);
   };
 
+  return (
+    <section className="panel question-panel">
+      <div className="panel-heading">
+        <h2>問題入力</h2>
+        <input
+          className="compact-input"
+          value={draft.title}
+          onChange={(event) => updateDraft({ title: event.target.value })}
+          placeholder="タイトル"
+        />
+      </div>
+
+      <label>
+        問題文
+        <textarea
+          value={draft.questionText}
+          onChange={(event) => updateDraft({ questionText: event.target.value })}
+          placeholder="問題文を入力、または下のボタンから問題画像を追加"
+        />
+      </label>
+
+      <div className="image-import-row">
+        <button type="button" onClick={() => fileInputRef.current?.click()}>
+          問題画像を追加
+        </button>
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={importImage} hidden />
+        {draft.questionImageDataUrl && (
+          <button
+            className="delete-button"
+            type="button"
+            onClick={() =>
+              updateDraft({
+                questionImageDataUrl: '',
+                questionImageName: '',
+                questionImageMimeType: '',
+                questionImageImportedAt: '',
+              })
+            }
+          >
+            画像削除
+          </button>
+        )}
+      </div>
+
+      {draft.questionImageDataUrl && (
+        <figure className="question-image-preview">
+          <img src={draft.questionImageDataUrl} alt="取り込んだ問題" />
+          <figcaption>{draft.questionImageName || '問題画像'}</figcaption>
+        </figure>
+      )}
+
+      <label>
+        模範解答
+        <textarea
+          value={draft.modelAnswer}
+          onChange={(event) => updateDraft({ modelAnswer: event.target.value })}
+          placeholder="正答、解法、期待する答え"
+        />
+      </label>
+
+      <div className="score-row">
+        <label>
+          配点
+          <input
+            type="number"
+            min="1"
+            value={draft.maxScore}
+            onChange={(event) => updateDraft({ maxScore: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+
+      <label>
+        採点基準
+        <textarea
+          value={draft.rubricText}
+          onChange={(event) => updateDraft({ rubricText: event.target.value })}
+          placeholder="部分点、減点条件、重視点"
+        />
+      </label>
+    </section>
+  );
+}
+
+function AnswerPanel({ draft, setDraft, tool, setTool, penSize, setPenSize, eraserSize, setEraserSize, canvasHostRef }) {
   const undo = () => {
     setDraft((current) => ({ ...current, strokes: current.strokes.slice(0, -1) }));
   };
 
   const clear = () => {
     if (!draft.strokes.length) return;
-    if (confirm('手書きをすべて消しますか？')) {
+    if (confirm('答案をすべて消しますか？')) {
       setDraft((current) => ({ ...current, strokes: [] }));
     }
   };
 
-  const exportCanvasImage = () => {
-    const canvas = canvasHostRef.current?.querySelector('canvas');
-    if (!canvas) return '';
-    return canvas.toDataURL('image/png');
-  };
-
-  const handleSave = async () => {
-    if (!draft.title.trim()) {
-      setStatus('タイトルを入力してください。');
-      return;
-    }
-
-    if (!draft.strokes.length && !confirm('手書きが空です。このまま保存しますか？')) {
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const note = {
-      ...draft,
-      title: draft.title.trim(),
-      imageDataUrl: exportCanvasImage(),
-      updatedAt: now,
-    };
-
-    await saveNote(note);
-    setStatus('保存しました。');
-    onSaved(note);
-  };
-
   return (
-    <main className="editor-page">
-      <header className="topbar">
-        <button className="ghost-button" type="button" onClick={onCancel}>
-          一覧
-        </button>
-        <input
-          className="title-input"
-          value={draft.title}
-          onChange={(event) => updateDraft('title', event.target.value)}
-          placeholder="タイトル"
-        />
-        <button className="primary-button" type="button" onClick={handleSave}>
-          保存
-        </button>
-      </header>
-
-      <section className="editor-shell">
-        <div className="canvas-panel">
-          <div className="tool-row">
-            <div className="tool-actions">
-              <button type="button" onClick={undo} disabled={!draft.strokes.length}>
-                戻る
-              </button>
-              <button type="button" onClick={clear} disabled={!draft.strokes.length}>
-                クリア
-              </button>
-            </div>
-            <div className="tool-switch" aria-label="描画ツール">
-              <button
-                className={tool === 'pen' ? 'active-tool' : ''}
-                type="button"
-                onClick={() => setTool('pen')}
-              >
-                ペン
-              </button>
-              <button
-                className={tool === 'eraser' ? 'active-tool' : ''}
-                type="button"
-                onClick={() => setTool('eraser')}
-              >
-                消しゴム
-              </button>
-            </div>
-            <label className="size-control">
-              {tool === 'pen' ? 'ペン太さ' : '消しゴム'}
-              <input
-                type="range"
-                min={tool === 'pen' ? '2' : '16'}
-                max={tool === 'pen' ? '12' : '90'}
-                value={tool === 'pen' ? penSize : eraserSize}
-                onChange={(event) =>
-                  tool === 'pen'
-                    ? setPenSize(event.target.value)
-                    : setEraserSize(event.target.value)
-                }
-              />
-              <span>{tool === 'pen' ? penSize : eraserSize}</span>
-            </label>
-          </div>
-          <div className="paper-canvas" ref={canvasHostRef}>
-            <DrawingCanvas
-              strokes={draft.strokes}
-              setStrokes={(updater) => {
-                setDraft((current) => ({
-                  ...current,
-                  strokes: typeof updater === 'function' ? updater(current.strokes) : updater,
-                }));
-              }}
-              tool={tool}
-              penSize={penSize}
-              eraserSize={eraserSize}
-            />
-          </div>
+    <section className="panel answer-panel">
+      <div className="panel-heading">
+        <h2>答案入力</h2>
+      </div>
+      <div className="tool-row">
+        <div className="tool-actions">
+          <button type="button" onClick={undo} disabled={!draft.strokes.length}>
+            戻る
+          </button>
+          <button type="button" onClick={clear} disabled={!draft.strokes.length}>
+            クリア
+          </button>
         </div>
-
-        <aside className="side-panel">
-          <label>
-            数式入力
-            <textarea
-              value={draft.formulaText}
-              onChange={(event) => updateDraft('formulaText', event.target.value)}
-              placeholder="例: x^2 - 5x + 6 = 0"
-            />
-          </label>
-
-          <FormulaPreview formula={draft.formulaText} />
-
-          <label>
-            答え・解説
-            <textarea
-              className="answer-input"
-              value={draft.answerText}
-              onChange={(event) => updateDraft('answerText', event.target.value)}
-              placeholder="例: (x - 2)(x - 3) = 0 より x = 2, 3"
-            />
-          </label>
-
-          {status && <p className="status-message">{status}</p>}
-        </aside>
-      </section>
-    </main>
+        <div className="tool-switch" aria-label="描画ツール">
+          <button className={tool === 'pen' ? 'active-tool' : ''} type="button" onClick={() => setTool('pen')}>
+            ペン
+          </button>
+          <button className={tool === 'eraser' ? 'active-tool' : ''} type="button" onClick={() => setTool('eraser')}>
+            消しゴム
+          </button>
+        </div>
+        <label className="size-control">
+          {tool === 'pen' ? 'ペン太さ' : '消しゴム'}
+          <input
+            type="range"
+            min={tool === 'pen' ? '2' : '16'}
+            max={tool === 'pen' ? '12' : '90'}
+            value={tool === 'pen' ? penSize : eraserSize}
+            onChange={(event) =>
+              tool === 'pen' ? setPenSize(event.target.value) : setEraserSize(event.target.value)
+            }
+          />
+          <span>{tool === 'pen' ? penSize : eraserSize}</span>
+        </label>
+      </div>
+      <div className="paper-canvas" ref={canvasHostRef}>
+        <DrawingCanvas
+          strokes={draft.strokes}
+          setStrokes={(updater) => {
+            setDraft((current) => ({
+              ...current,
+              strokes: typeof updater === 'function' ? updater(current.strokes) : updater,
+            }));
+          }}
+          tool={tool}
+          penSize={penSize}
+          eraserSize={eraserSize}
+        />
+      </div>
+    </section>
   );
 }
 
-function HomeView({ notes, query, setQuery, onNew, onOpen, onDelete }) {
-  const filteredNotes = notes.filter((note) =>
-    note.title.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-
+function GradingPanel({ result, status, rawText }) {
   return (
-    <main className="home-page">
-      <header className="home-header">
-        <div>
-          <p className="eyebrow">iPad Web Notebook</p>
-          <h1>手書き数式ノート</h1>
-        </div>
-        <button className="primary-button" type="button" onClick={onNew}>
-          新規作成
-        </button>
-      </header>
-
-      <section className="search-row">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="タイトルで検索"
-        />
-      </section>
-
-      <section className="note-list" aria-label="保存済みノート一覧">
-        {filteredNotes.length === 0 ? (
-          <div className="empty-state">
-            <h2>まだノートがありません</h2>
-            <p>新規作成から、最初の数式を書き始められます。</p>
+    <section className="panel grading-panel">
+      <div className="panel-heading">
+        <h2>採点結果</h2>
+      </div>
+      {status && <p className="status-message">{status}</p>}
+      {!result ? (
+        <div className="empty-result">採点すると結果がここに表示されます。</div>
+      ) : (
+        <div className="result-stack">
+          <div className={`score-badge ${result.resultType || ''}`}>
+            <span>{result.score ?? '-'} / {result.maxScore ?? '-'}</span>
+            <small>{result.resultType || 'result'}</small>
           </div>
-        ) : (
-          filteredNotes.map((note) => (
-            <article className="note-card" key={note.id}>
-              <button className="note-open" type="button" onClick={() => onOpen(note)}>
-                <span>{note.title}</span>
-                <time>{formatDate(note.updatedAt)}</time>
+          <section>
+            <h3>読み取り問題</h3>
+            <p>{result.recognizedQuestion || '未取得'}</p>
+          </section>
+          <section>
+            <h3>読み取り答案</h3>
+            <p>{result.recognizedAnswer || '未取得'}</p>
+          </section>
+          <FormulaPreview formula={result.recognizedLatex || ''} emptyText="読み取りLaTeXなし" />
+          <section>
+            <h3>フィードバック</h3>
+            <p>{result.feedback || 'なし'}</p>
+          </section>
+          <section>
+            <h3>間違い</h3>
+            <ul>{(result.mistakes || []).map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+          <section>
+            <h3>改善案</h3>
+            <ul>{(result.improvements || []).map((item) => <li key={item}>{item}</li>)}</ul>
+          </section>
+          <p className="meta-text">信頼度: {result.confidence || 'unknown'}</p>
+        </div>
+      )}
+      {rawText && (
+        <details className="raw-result">
+          <summary>生テキスト</summary>
+          <pre>{rawText}</pre>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function HistoryList({ records, onLoad, onDelete }) {
+  return (
+    <section className="history-section">
+      <h2>採点履歴</h2>
+      {records.length === 0 ? (
+        <p className="meta-text">まだ履歴はありません。</p>
+      ) : (
+        <div className="history-list">
+          {records.map((record) => (
+            <article className="history-card" key={record.id}>
+              <button type="button" onClick={() => onLoad(record)}>
+                <strong>{record.title || '無題の答案'}</strong>
+                <small>{formatDate(record.updatedAt)}</small>
               </button>
-              <button
-                className="delete-button"
-                type="button"
-                onClick={() => onDelete(note)}
-                aria-label={`${note.title}を削除`}
-              >
+              <span>{record.gradingResult ? `${record.gradingResult.score}/${record.gradingResult.maxScore}` : '未採点'}</span>
+              <button className="delete-button" type="button" onClick={() => onDelete(record)}>
                 削除
               </button>
             </article>
-          ))
-        )}
-      </section>
-    </main>
-  );
-}
-
-function DetailView({ note, onBack, onEdit, onDelete }) {
-  return (
-    <main className="detail-page">
-      <header className="topbar">
-        <button className="ghost-button" type="button" onClick={onBack}>
-          一覧
-        </button>
-        <h1>{note.title}</h1>
-        <div className="topbar-actions">
-          <button type="button" onClick={() => onEdit(note)}>
-            編集
-          </button>
-          <button className="delete-button" type="button" onClick={() => onDelete(note)}>
-            削除
-          </button>
+          ))}
         </div>
-      </header>
-
-      <section className="detail-grid">
-        <div className="saved-image-panel">
-          {note.imageDataUrl ? (
-            <img src={note.imageDataUrl} alt={`${note.title}の手書き数式`} />
-          ) : (
-            <p>手書き画像はありません。</p>
-          )}
-        </div>
-
-        <aside className="side-panel">
-          <p className="meta-text">更新: {formatDate(note.updatedAt)}</p>
-          <FormulaPreview formula={note.formulaText} />
-          <div className="answer-box">
-            <h2>答え・解説</h2>
-            <p>{note.answerText || '未入力'}</p>
-          </div>
-        </aside>
-      </section>
-    </main>
+      )}
+    </section>
   );
 }
 
 function App() {
-  const [notes, setNotes] = useState([]);
-  const [view, setView] = useState({ name: 'home' });
-  const [query, setQuery] = useState('');
+  const [draft, setDraft] = useState(emptyDraft);
+  const [records, setRecords] = useState([]);
+  const [usage, setUsage] = useState(null);
+  const [dailyLimit, setDailyLimit] = useState(defaultDailyLimit);
+  const [modelName, setModelName] = useState('gemini-2.5-flash-lite');
+  const [tool, setTool] = useState('pen');
+  const [penSize, setPenSize] = useState(4);
+  const [eraserSize, setEraserSize] = useState(34);
+  const [status, setStatus] = useState('');
+  const [rawText, setRawText] = useState('');
+  const canvasHostRef = useRef(null);
+  const usageDate = getUsageDate();
 
-  const loadNotes = useCallback(async () => {
-    const loaded = await getAllNotes();
-    setNotes(loaded);
+  const loadRecords = useCallback(async () => {
+    setRecords(await getAllRecords());
   }, []);
 
-  useEffect(() => {
-    loadNotes();
-  }, [loadNotes]);
+  const loadUsage = useCallback(async () => {
+    const stored = await getUsage(usageDate);
+    setUsage(
+      stored || {
+        usageDate,
+        timezoneBasis,
+        modelName,
+        dailyLimit,
+        successfulRequests: 0,
+        failedRequests: 0,
+      },
+    );
+  }, [dailyLimit, modelName, usageDate]);
 
-  const removeNote = async (note) => {
-    if (!confirm(`「${note.title}」を削除しますか？`)) return;
-    await deleteNote(note.id);
-    await loadNotes();
-    setView({ name: 'home' });
+  useEffect(() => {
+    loadRecords();
+    loadUsage();
+
+    fetch('/api/usage-config')
+      .then((response) => response.json())
+      .then((config) => {
+        if (config.dailyLimit) setDailyLimit(Number(config.dailyLimit));
+        if (config.modelName) setModelName(config.modelName);
+      })
+      .catch(() => {
+        setStatus('利用量設定を取得できませんでした。既定値で続行します。');
+      });
+  }, [loadRecords, loadUsage]);
+
+  const updateDraft = (patch) => {
+    setDraft((current) => ({ ...current, ...patch }));
   };
 
-  if (view.name === 'editor') {
-    return (
-      <EditorView
-        initialNote={view.note}
-        onCancel={() => setView({ name: 'home' })}
-        onSaved={async (note) => {
-          await loadNotes();
-          setView({ name: 'detail', note });
-        }}
-      />
-    );
-  }
+  const exportCanvasImage = () => {
+    const canvas = canvasHostRef.current?.querySelector('canvas');
+    return canvas ? canvas.toDataURL('image/png') : '';
+  };
 
-  if (view.name === 'detail') {
-    const note = notes.find((item) => item.id === view.note.id) || view.note;
-    return (
-      <DetailView
-        note={note}
-        onBack={() => setView({ name: 'home' })}
-        onEdit={(target) => setView({ name: 'editor', note: target })}
-        onDelete={removeNote}
-      />
-    );
-  }
+  const persistRecord = async (recordPatch = {}) => {
+    const now = new Date().toISOString();
+    const record = {
+      ...draft,
+      ...recordPatch,
+      answerImageDataUrl: exportCanvasImage(),
+      title: draft.title.trim(),
+      updatedAt: now,
+    };
+
+    await saveRecord(record);
+    setDraft(record);
+    await loadRecords();
+    return record;
+  };
+
+  const incrementUsage = async (field) => {
+    const current = usage || {
+      usageDate,
+      timezoneBasis,
+      modelName,
+      dailyLimit,
+      successfulRequests: 0,
+      failedRequests: 0,
+    };
+    const next = {
+      ...current,
+      dailyLimit,
+      modelName,
+      [field]: (current[field] || 0) + 1,
+      lastRequestAt: new Date().toISOString(),
+    };
+    if (field === 'failedRequests') {
+      next.lastRateLimitErrorAt = new Date().toISOString();
+    }
+    await saveUsage(next);
+    setUsage(next);
+  };
+
+  const validateBeforeGrade = () => {
+    if (!draft.questionText.trim() && !draft.questionImageDataUrl) {
+      return '問題文または問題画像を入力してください。';
+    }
+    if (!draft.modelAnswer.trim()) {
+      return '模範解答を入力してください。';
+    }
+    if (!draft.strokes.length) {
+      return '答案を手書きしてください。';
+    }
+    const used = usage?.successfulRequests || 0;
+    if (used >= dailyLimit && !confirm('残り目安が0回です。このまま採点しますか？')) {
+      return '採点をキャンセルしました。';
+    }
+    return '';
+  };
+
+  const grade = async () => {
+    setRawText('');
+    const validation = validateBeforeGrade();
+    if (validation) {
+      setStatus(validation);
+      return;
+    }
+
+    setStatus('Geminiで採点中です...');
+    const answerImageDataUrl = exportCanvasImage();
+
+    try {
+      const response = await fetch('/api/grade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionText: draft.questionText,
+          questionImage: imageDataUrlToPayload(draft.questionImageDataUrl),
+          modelAnswer: draft.modelAnswer,
+          rubricText: draft.rubricText,
+          maxScore: Number(draft.maxScore) || 10,
+          answerImage: imageDataUrlToPayload(answerImageDataUrl),
+        }),
+      });
+
+      const body = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 429) await incrementUsage('failedRequests');
+        throw new Error(body.error || '採点に失敗しました。');
+      }
+
+      setRawText(body.rawText || '');
+      await incrementUsage('successfulRequests');
+      await persistRecord({ answerImageDataUrl, gradingResult: body.result });
+      setStatus('採点しました。');
+    } catch (error) {
+      setStatus(error.message);
+    }
+  };
+
+  const saveCurrent = async () => {
+    try {
+      await persistRecord();
+      setStatus('保存しました。');
+    } catch {
+      setStatus('保存に失敗しました。');
+    }
+  };
+
+  const deleteExistingRecord = async (record) => {
+    if (!confirm(`「${record.title || '無題の答案'}」を削除しますか？`)) return;
+    await deleteRecord(record.id);
+    await loadRecords();
+    if (draft.id === record.id) {
+      setDraft(emptyDraft());
+    }
+  };
 
   return (
-    <HomeView
-      notes={notes}
-      query={query}
-      setQuery={setQuery}
-      onNew={() => setView({ name: 'editor', note: emptyDraft() })}
-      onOpen={(note) => setView({ name: 'detail', note })}
-      onDelete={removeNote}
-    />
+    <main className="app-page">
+      <header className="app-header">
+        <div>
+          <p className="eyebrow">Gemini API Grading</p>
+          <h1>手書き答案採点</h1>
+        </div>
+        <UsageMeter usage={usage} dailyLimit={dailyLimit} />
+        <div className="header-actions">
+          <button type="button" onClick={() => setDraft(emptyDraft())}>
+            新規
+          </button>
+          <button type="button" onClick={saveCurrent}>
+            保存
+          </button>
+          <button className="primary-button" type="button" onClick={grade}>
+            採点する
+          </button>
+        </div>
+      </header>
+
+      <section className="grading-layout">
+        <QuestionPanel draft={draft} updateDraft={updateDraft} />
+        <AnswerPanel
+          draft={draft}
+          setDraft={setDraft}
+          tool={tool}
+          setTool={setTool}
+          penSize={penSize}
+          setPenSize={setPenSize}
+          eraserSize={eraserSize}
+          setEraserSize={setEraserSize}
+          canvasHostRef={canvasHostRef}
+        />
+        <GradingPanel result={draft.gradingResult} status={status} rawText={rawText} />
+      </section>
+
+      <HistoryList records={records} onLoad={setDraft} onDelete={deleteExistingRecord} />
+    </main>
   );
 }
 
