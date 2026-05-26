@@ -613,6 +613,23 @@ function GradingPanel({ result, status, rawText }) {
             <p>{result.recognizedAnswer || '未取得'}</p>
           </section>
           <FormulaPreview formula={result.recognizedLatex || ''} emptyText="読み取りLaTeXなし" />
+          {(result.expectedFinalAnswer || result.studentFinalAnswer || result.finalAnswerComparison?.length > 0) && (
+            <section>
+              <h3>最終解答の照合</h3>
+              {result.expectedFinalAnswer && <p>模範: {result.expectedFinalAnswer}</p>}
+              {result.studentFinalAnswer && <p>答案: {result.studentFinalAnswer}</p>}
+              {result.finalAnswerComparison?.length > 0 && (
+                <ul>
+                  {result.finalAnswerComparison.map((item, index) => (
+                    <li key={`${item.item || 'comparison'}-${index}`}>
+                      {item.item ? `${item.item}: ` : ''}
+                      {item.difference || `${item.expected || ''} / ${item.student || ''}`}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
           <section>
             <h3>フィードバック</h3>
             <p>{result.feedback || 'なし'}</p>
