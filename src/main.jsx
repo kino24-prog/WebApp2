@@ -17,6 +17,10 @@ const emptyDraft = () => ({
   questionImageMimeType: '',
   questionImageImportedAt: '',
   modelAnswer: '',
+  modelAnswerImageDataUrl: '',
+  modelAnswerImageName: '',
+  modelAnswerImageMimeType: '',
+  modelAnswerImageImportedAt: '',
   rubricText: '',
   maxScore: 10,
   strokes: [],
@@ -359,9 +363,10 @@ function DrawingCanvas({ strokes, setStrokes, tool, penSize, eraserSize }) {
 }
 
 function QuestionPanel({ draft, updateDraft }) {
-  const fileInputRef = useRef(null);
+  const questionFileInputRef = useRef(null);
+  const modelAnswerFileInputRef = useRef(null);
 
-  const importImage = async (event) => {
+  const importImage = async (event, target) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -372,12 +377,21 @@ function QuestionPanel({ draft, updateDraft }) {
 
     const reader = new FileReader();
     reader.onload = () => {
-      updateDraft({
-        questionImageDataUrl: reader.result,
-        questionImageName: file.name,
-        questionImageMimeType: file.type,
-        questionImageImportedAt: new Date().toISOString(),
-      });
+      if (target === 'question') {
+        updateDraft({
+          questionImageDataUrl: reader.result,
+          questionImageName: file.name,
+          questionImageMimeType: file.type,
+          questionImageImportedAt: new Date().toISOString(),
+        });
+      } else {
+        updateDraft({
+          modelAnswerImageDataUrl: reader.result,
+          modelAnswerImageName: file.name,
+          modelAnswerImageMimeType: file.type,
+          modelAnswerImageImportedAt: new Date().toISOString(),
+        });
+      }
     };
     reader.onerror = () => alert('画像を読み込めませんでした。');
     reader.readAsDataURL(file);
@@ -405,10 +419,16 @@ function QuestionPanel({ draft, updateDraft }) {
       </label>
 
       <div className="image-import-row">
-        <button type="button" onClick={() => fileInputRef.current?.click()}>
+        <button type="button" onClick={() => questionFileInputRef.current?.click()}>
           問題画像を追加
         </button>
-        <input ref={fileInputRef} type="file" accept="image/*" onChange={importImage} hidden />
+        <input
+          ref={questionFileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={(event) => importImage(event, 'question')}
+          hidden
+        />
         {draft.questionImageDataUrl && (
           <button
             className="delete-button"
@@ -428,7 +448,7 @@ function QuestionPanel({ draft, updateDraft }) {
       </div>
 
       {draft.questionImageDataUrl && (
-        <figure className="question-image-preview">
+        <figure className="image-preview">
           <img src={draft.questionImageDataUrl} alt="取り込んだ問題" />
           <figcaption>{draft.questionImageName || '問題画像'}</figcaption>
         </figure>
@@ -439,9 +459,45 @@ function QuestionPanel({ draft, updateDraft }) {
         <textarea
           value={draft.modelAnswer}
           onChange={(event) => updateDraft({ modelAnswer: event.target.value })}
-          placeholder="正答、解法、期待する答え"
+          placeholder="正答、解法、期待する答え。画像だけでも可"
         />
       </label>
+
+      <div className="image-import-row">
+        <button type="button" onClick={() => modelAnswerFileInputRef.current?.click()}>
+          模範解答画像を追加
+        </button>
+        <input
+          ref={modelAnswerFileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={(event) => importImage(event, 'modelAnswer')}
+          hidden
+        />
+        {draft.modelAnswerImageDataUrl && (
+          <button
+            className="delete-button"
+            type="button"
+            onClick={() =>
+              updateDraft({
+                modelAnswerImageDataUrl: '',
+                modelAnswerImageName: '',
+                modelAnswerImageMimeType: '',
+                modelAnswerImageImportedAt: '',
+              })
+            }
+          >
+            画像削除
+          </button>
+        )}
+      </div>
+
+      {draft.modelAnswerImageDataUrl && (
+        <figure className="image-preview">
+          <img src={draft.modelAnswerImageDataUrl} alt="取り込んだ模範解答" />
+          <figcaption>{draft.modelAnswerImageName || '模範解答画像'}</figcaption>
+        </figure>
+      )}
 
       <div className="score-row">
         <label>
@@ -610,6 +666,7 @@ function HistoryList({ records, onLoad, onDelete }) {
 
 function App() {
   const [draft, setDraft] = useState(emptyDraft);
+  const [inputView, setInputView] = useState('answer');
   const [records, setRecords] = useState([]);
   const [usage, setUsage] = useState(null);
   const [dailyLimit, setDailyLimit] = useState(defaultDailyLimit);
@@ -707,8 +764,8 @@ function App() {
     if (!draft.questionText.trim() && !draft.questionImageDataUrl) {
       return '問題文または問題画像を入力してください。';
     }
-    if (!draft.modelAnswer.trim()) {
-      return '模範解答を入力してください。';
+    if (!draft.modelAnswer.trim() && !draft.modelAnswerImageDataUrl) {
+      return '模範解答または模範解答画像を入力してください。';
     }
     if (!draft.strokes.length) {
       return '答案を手書きしてください。';
@@ -739,6 +796,7 @@ function App() {
           questionText: draft.questionText,
           questionImage: imageDataUrlToPayload(draft.questionImageDataUrl),
           modelAnswer: draft.modelAnswer,
+          modelAnswerImage: imageDataUrlToPayload(draft.modelAnswerImageDataUrl),
           rubricText: draft.rubricText,
           maxScore: Number(draft.maxScore) || 10,
           answerImage: imageDataUrlToPayload(answerImageDataUrl),
@@ -801,18 +859,39 @@ function App() {
       </header>
 
       <section className="grading-layout">
-        <QuestionPanel draft={draft} updateDraft={updateDraft} />
-        <AnswerPanel
-          draft={draft}
-          setDraft={setDraft}
-          tool={tool}
-          setTool={setTool}
-          penSize={penSize}
-          setPenSize={setPenSize}
-          eraserSize={eraserSize}
-          setEraserSize={setEraserSize}
-          canvasHostRef={canvasHostRef}
-        />
+        <section className="input-workspace">
+          <div className="input-tabs" aria-label="入力切替">
+            <button
+              className={inputView === 'answer' ? 'active-tab' : ''}
+              type="button"
+              onClick={() => setInputView('answer')}
+            >
+              答案
+            </button>
+            <button
+              className={inputView === 'question' ? 'active-tab' : ''}
+              type="button"
+              onClick={() => setInputView('question')}
+            >
+              問題・模範解答
+            </button>
+          </div>
+          {inputView === 'question' ? (
+            <QuestionPanel draft={draft} updateDraft={updateDraft} />
+          ) : (
+            <AnswerPanel
+              draft={draft}
+              setDraft={setDraft}
+              tool={tool}
+              setTool={setTool}
+              penSize={penSize}
+              setPenSize={setPenSize}
+              eraserSize={eraserSize}
+              setEraserSize={setEraserSize}
+              canvasHostRef={canvasHostRef}
+            />
+          )}
+        </section>
         <GradingPanel result={draft.gradingResult} status={status} rawText={rawText} />
       </section>
 

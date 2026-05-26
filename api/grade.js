@@ -38,6 +38,7 @@ export default async function handler(request, response) {
     questionText = '',
     questionImage,
     modelAnswer = '',
+    modelAnswerImage,
     rubricText = '',
     maxScore = 10,
     answerImage,
@@ -48,8 +49,8 @@ export default async function handler(request, response) {
     return;
   }
 
-  if (!modelAnswer.trim()) {
-    response.status(400).json({ error: '模範解答を入力してください。' });
+  if (!modelAnswer.trim() && !modelAnswerImage?.data) {
+    response.status(400).json({ error: '模範解答または模範解答画像を入力してください。' });
     return;
   }
 
@@ -69,7 +70,7 @@ export default async function handler(request, response) {
 ${questionText || '問題画像を参照してください。'}
 
 模範解答:
-${modelAnswer}
+${modelAnswer || '模範解答画像を参照してください。'}
 
 採点基準:
 ${rubricText || '部分点を考慮し、途中式と最終解答を総合的に採点してください。'}
@@ -98,6 +99,13 @@ ${maxScore}
     parts.push({ text: '問題画像:' });
     parts.push(normalizedQuestionImage);
   }
+
+  const normalizedModelAnswerImage = normalizeImage(modelAnswerImage);
+  if (normalizedModelAnswerImage) {
+    parts.push({ text: '模範解答画像:' });
+    parts.push(normalizedModelAnswerImage);
+  }
+
   parts.push({ text: '手書き答案画像:' });
   parts.push(normalizeImage(answerImage));
 
