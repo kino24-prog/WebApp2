@@ -35,6 +35,7 @@ export default async function handler(request, response) {
   const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
   const body = request.body || {};
   const {
+    mode = 'full',
     questionText = '',
     questionImage,
     modelAnswer = '',
@@ -42,6 +43,10 @@ export default async function handler(request, response) {
     rubricText = '',
     maxScore = 10,
     answerImage,
+    gradingStrictness = 'standard',
+    correctedQuestion = '',
+    correctedAnswer = '',
+    correctedLatex = '',
   } = body;
 
   if (!questionText.trim() && !questionImage?.data) {
@@ -59,7 +64,53 @@ export default async function handler(request, response) {
     return;
   }
 
-  const prompt = `
+  const strictnessGuide = {
+    lenient: '甘め。考え方が合っていれば部分点を多めにし、軽微な記述不足は大きく減点しすぎない。',
+    standard: '標準。一般的な学校採点に近いバランスで、最終解答と途中式を総合評価する。',
+    strict: '厳しめ。途中式不足、条件漏れ、表記の曖昧さ、符号や係数の誤りを明確に減点する。',
+  };
+
+  const correctedBlock =
+    correctedQuestion || correctedAnswer || correctedLatex
+      ? `
+ユーザー修正済みの読み取り結果:
+問題:
+${correctedQuestion || '修正なし'}
+
+答案:
+${correctedAnswer || '修正なし'}
+
+LaTeX:
+${correctedLatex || '修正なし'}
+
+採点時は、画像からの再読取よりもユーザー修正済みの読み取り結果を優先してください。
+`
+      : '';
+
+  const recognizeOnly = mode === 'recognize';
+  const prompt = recognizeOnly
+    ? `
+あなたは数学答案のOCR担当者です。
+問題画像または問題文、模範解答、答案画像を読み取り、採点はせずに構造化された読み取り結果だけを返してください。
+読み取れない文字を推測しすぎないでください。
+読み取りが不確実な場合は confidence を low にしてください。
+
+問題文:
+${questionText || '問題画像を参照してください。'}
+
+模範解答:
+${modelAnswer || '模範解答画像を参照してください。'}
+
+出力は必ず次のJSON形式のみとしてください。説明文やMarkdownは付けないでください。
+{
+  "recognizedQuestion": "読み取った問題内容",
+  "recognizedAnswer": "読み取った答案内容",
+  "recognizedLatex": "読み取った主要な数式のLaTeX。なければ空文字",
+  "confidence": "high | medium | low",
+  "recognitionNotes": ["読み取りが不確実な箇所"]
+}
+`
+    : `
 あなたは数学答案の採点者です。
 問題画像または問題文を読み取り、手書き答案画像を採点してください。
 模範解答と採点基準に基づいて、厳密に採点してください。
@@ -75,6 +126,8 @@ export default async function handler(request, response) {
 - 答案に複数小問がある場合は、小問ごとに最終解答を比較し、1問でも誤りがあれば満点にしないでください。
 - 認識した答案と模範解答を見比べ、最終解答の差分を finalAnswerComparison に必ず書いてください。
 - 模範解答の形式と答案の形式が違う場合は、必要なら同値変形して比較してください。ただし同値性を確認できない場合は correct にしないでください。
+- 答案画像上のミス位置を推定できる場合は annotations に相対座標で出力してください。位置が不確実な場合は無理に座標を作らず、注釈一覧として意味が通る message を優先してください。
+- mistakeCategories には sign_error, calculation_error, missing_explanation, formula_recognition_risk, condition_missed, final_answer_error などの短い分類名を入れてください。
 
 問題文:
 ${questionText || '問題画像を参照してください。'}
@@ -84,6 +137,11 @@ ${modelAnswer || '模範解答画像を参照してください。'}
 
 採点基準:
 ${rubricText || '部分点を考慮し、途中式と最終解答を総合的に採点してください。'}
+
+採点の厳しさ:
+${strictnessGuide[gradingStrictness] || strictnessGuide.standard}
+
+${correctedBlock}
 
 満点:
 ${maxScore}
@@ -110,6 +168,21 @@ ${maxScore}
   "feedback": "学習者向けの短い日本語フィードバック",
   "mistakes": ["誤りや不足点"],
   "improvements": ["次に直すべきポイント"],
+  "mistakeCategories": ["短い英語のミス分類"],
+  "annotations": [
+    {
+      "id": "ann-1",
+      "type": "mistake | warning | good | note",
+      "target": "answer",
+      "x": 0.35,
+      "y": 0.48,
+      "width": 0.22,
+      "height": 0.07,
+      "message": "答案画像上に重ねる短いコメント",
+      "severity": "high | medium | low",
+      "relatedMistakeIndex": 0
+    }
+  ],
   "confidence": "high | medium | low"
 }
 `;

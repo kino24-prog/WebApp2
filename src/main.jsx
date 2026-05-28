@@ -23,6 +23,20 @@ const emptyDraft = () => ({
   modelAnswerImageImportedAt: '',
   rubricText: '',
   maxScore: 10,
+  gradingStrictness: 'standard',
+  answerInputSource: 'canvas',
+  uploadedAnswerImageDataUrl: '',
+  uploadedAnswerFileName: '',
+  uploadedAnswerMimeType: '',
+  uploadedAnswerImportedAt: '',
+  recognizedQuestionDraft: '',
+  recognizedAnswerDraft: '',
+  recognizedLatexDraft: '',
+  userCorrectedQuestion: '',
+  userCorrectedAnswer: '',
+  userCorrectedLatex: '',
+  annotations: [],
+  mistakeCategories: [],
   strokes: [],
   answerImageDataUrl: '',
   gradingResult: null,
@@ -55,6 +69,17 @@ function imageDataUrlToPayload(dataUrl) {
   return {
     mimeType: match?.[1] || 'image/png',
     data,
+  };
+}
+
+function normalizeRecord(record) {
+  return {
+    ...emptyDraft(),
+    ...record,
+    gradingStrictness: record.gradingStrictness || 'standard',
+    answerInputSource: record.answerInputSource || 'canvas',
+    annotations: record.annotations || record.gradingResult?.annotations || [],
+    mistakeCategories: record.mistakeCategories || record.gradingResult?.mistakeCategories || [],
   };
 }
 
@@ -512,6 +537,18 @@ function QuestionPanel({ draft, updateDraft }) {
       </div>
 
       <label>
+        採点の厳しさ
+        <select
+          value={draft.gradingStrictness}
+          onChange={(event) => updateDraft({ gradingStrictness: event.target.value })}
+        >
+          <option value="lenient">甘め</option>
+          <option value="standard">標準</option>
+          <option value="strict">厳しめ</option>
+        </select>
+      </label>
+
+      <label>
         採点基準
         <textarea
           value={draft.rubricText}
@@ -523,7 +560,33 @@ function QuestionPanel({ draft, updateDraft }) {
   );
 }
 
-function AnswerPanel({ draft, setDraft, tool, setTool, penSize, setPenSize, eraserSize, setEraserSize, canvasHostRef }) {
+function AnswerPanel({ draft, setDraft, updateDraft, tool, setTool, penSize, setPenSize, eraserSize, setEraserSize, canvasHostRef }) {
+  const answerFileInputRef = useRef(null);
+
+  const importAnswerImage = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('対応していない画像形式です。');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateDraft({
+        answerInputSource: 'uploadedImage',
+        uploadedAnswerImageDataUrl: reader.result,
+        uploadedAnswerFileName: file.name,
+        uploadedAnswerMimeType: file.type,
+        uploadedAnswerImportedAt: new Date().toISOString(),
+      });
+    };
+    reader.onerror = () => alert('画像を読み込めませんでした。');
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
   const undo = () => {
     setDraft((current) => ({ ...current, strokes: current.strokes.slice(0, -1) }));
   };
@@ -540,51 +603,216 @@ function AnswerPanel({ draft, setDraft, tool, setTool, penSize, setPenSize, eras
       <div className="panel-heading">
         <h2>答案入力</h2>
       </div>
-      <div className="tool-row">
-        <div className="tool-actions">
-          <button type="button" onClick={undo} disabled={!draft.strokes.length}>
-            戻る
-          </button>
-          <button type="button" onClick={clear} disabled={!draft.strokes.length}>
-            クリア
-          </button>
-        </div>
-        <div className="tool-switch" aria-label="描画ツール">
-          <button className={tool === 'pen' ? 'active-tool' : ''} type="button" onClick={() => setTool('pen')}>
-            ペン
-          </button>
-          <button className={tool === 'eraser' ? 'active-tool' : ''} type="button" onClick={() => setTool('eraser')}>
-            消しゴム
-          </button>
-        </div>
-        <label className="size-control">
-          {tool === 'pen' ? 'ペン太さ' : '消しゴム'}
-          <input
-            type="range"
-            min={tool === 'pen' ? '2' : '16'}
-            max={tool === 'pen' ? '12' : '90'}
-            value={tool === 'pen' ? penSize : eraserSize}
-            onChange={(event) =>
-              tool === 'pen' ? setPenSize(event.target.value) : setEraserSize(event.target.value)
+      <div className="answer-source-row" aria-label="答案入力方法">
+        <button
+          className={draft.answerInputSource === 'canvas' ? 'active-source' : ''}
+          type="button"
+          onClick={() => updateDraft({ answerInputSource: 'canvas' })}
+        >
+          手書き
+        </button>
+        <button
+          className={draft.answerInputSource === 'uploadedImage' ? 'active-source' : ''}
+          type="button"
+          onClick={() => answerFileInputRef.current?.click()}
+        >
+          画像
+        </button>
+        <input ref={answerFileInputRef} type="file" accept="image/*" onChange={importAnswerImage} hidden />
+        {draft.uploadedAnswerImageDataUrl && (
+          <button
+            className="delete-button"
+            type="button"
+            onClick={() =>
+              updateDraft({
+                answerInputSource: 'canvas',
+                uploadedAnswerImageDataUrl: '',
+                uploadedAnswerFileName: '',
+                uploadedAnswerMimeType: '',
+                uploadedAnswerImportedAt: '',
+              })
             }
-          />
-          <span>{tool === 'pen' ? penSize : eraserSize}</span>
-        </label>
+          >
+            画像削除
+          </button>
+        )}
       </div>
-      <div className="paper-canvas" ref={canvasHostRef}>
-        <DrawingCanvas
-          strokes={draft.strokes}
-          setStrokes={(updater) => {
-            setDraft((current) => ({
-              ...current,
-              strokes: typeof updater === 'function' ? updater(current.strokes) : updater,
-            }));
-          }}
-          tool={tool}
-          penSize={penSize}
-          eraserSize={eraserSize}
+      {draft.answerInputSource === 'uploadedImage' ? (
+        <figure className="answer-image-preview">
+          {draft.uploadedAnswerImageDataUrl ? (
+            <>
+              <img src={draft.uploadedAnswerImageDataUrl} alt="取り込んだ答案" />
+              <figcaption>{draft.uploadedAnswerFileName || '答案画像'}</figcaption>
+            </>
+          ) : (
+            <button type="button" onClick={() => answerFileInputRef.current?.click()}>
+              答案画像を選択
+            </button>
+          )}
+        </figure>
+      ) : (
+        <>
+          <div className="tool-row">
+            <div className="tool-actions">
+              <button type="button" onClick={undo} disabled={!draft.strokes.length}>
+                戻る
+              </button>
+              <button type="button" onClick={clear} disabled={!draft.strokes.length}>
+                クリア
+              </button>
+            </div>
+            <div className="tool-switch" aria-label="描画ツール">
+              <button className={tool === 'pen' ? 'active-tool' : ''} type="button" onClick={() => setTool('pen')}>
+                ペン
+              </button>
+              <button className={tool === 'eraser' ? 'active-tool' : ''} type="button" onClick={() => setTool('eraser')}>
+                消しゴム
+              </button>
+            </div>
+            <label className="size-control">
+              {tool === 'pen' ? 'ペン太さ' : '消しゴム'}
+              <input
+                type="range"
+                min={tool === 'pen' ? '2' : '16'}
+                max={tool === 'pen' ? '12' : '90'}
+                value={tool === 'pen' ? penSize : eraserSize}
+                onChange={(event) =>
+                  tool === 'pen' ? setPenSize(event.target.value) : setEraserSize(event.target.value)
+                }
+              />
+              <span>{tool === 'pen' ? penSize : eraserSize}</span>
+            </label>
+          </div>
+          <div className="paper-canvas" ref={canvasHostRef}>
+            <DrawingCanvas
+              strokes={draft.strokes}
+              setStrokes={(updater) => {
+                setDraft((current) => ({
+                  ...current,
+                  strokes: typeof updater === 'function' ? updater(current.strokes) : updater,
+                }));
+              }}
+              tool={tool}
+              penSize={penSize}
+              eraserSize={eraserSize}
+            />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function RecognitionPanel({ draft, updateDraft, onRecognize, onGradeCorrected, status }) {
+  return (
+    <section className="panel recognition-panel">
+      <div className="panel-heading">
+        <h2>認識結果</h2>
+      </div>
+      {status && <p className="status-message">{status}</p>}
+      <div className="review-actions">
+        <button type="button" onClick={onRecognize}>
+          テキスト化
+        </button>
+        <button className="primary-button" type="button" onClick={onGradeCorrected}>
+          この内容で採点
+        </button>
+        <button
+          type="button"
+          disabled={!draft.recognizedQuestionDraft && !draft.recognizedAnswerDraft && !draft.recognizedLatexDraft}
+          onClick={() =>
+            updateDraft({
+              userCorrectedQuestion: draft.recognizedQuestionDraft,
+              userCorrectedAnswer: draft.recognizedAnswerDraft,
+              userCorrectedLatex: draft.recognizedLatexDraft,
+            })
+          }
+        >
+          AI読取に戻す
+        </button>
+      </div>
+      <label>
+        読み取り問題
+        <textarea
+          value={draft.userCorrectedQuestion || draft.recognizedQuestionDraft}
+          onChange={(event) => updateDraft({ userCorrectedQuestion: event.target.value })}
+          placeholder="テキスト化すると、AIが読み取った問題が入ります"
         />
+      </label>
+      <label>
+        読み取り答案
+        <textarea
+          value={draft.userCorrectedAnswer || draft.recognizedAnswerDraft}
+          onChange={(event) => updateDraft({ userCorrectedAnswer: event.target.value })}
+          placeholder="テキスト化すると、AIが読み取った答案が入ります"
+        />
+      </label>
+      <label>
+        読み取りLaTeX
+        <textarea
+          value={draft.userCorrectedLatex || draft.recognizedLatexDraft}
+          onChange={(event) => updateDraft({ userCorrectedLatex: event.target.value })}
+          placeholder="主要な数式のLaTeX"
+        />
+      </label>
+      <FormulaPreview
+        formula={draft.userCorrectedLatex || draft.recognizedLatexDraft}
+        emptyText="読み取りLaTeXなし"
+      />
+    </section>
+  );
+}
+
+function RedPenPanel({ answerImageDataUrl, annotations = [] }) {
+  const positionedAnnotations = annotations.filter(
+    (annotation) =>
+      Number.isFinite(Number(annotation.x)) &&
+      Number.isFinite(Number(annotation.y)) &&
+      Number.isFinite(Number(annotation.width)) &&
+      Number.isFinite(Number(annotation.height)),
+  );
+
+  return (
+    <section className="panel redpen-panel">
+      <div className="panel-heading">
+        <h2>赤ペン</h2>
       </div>
+      {!answerImageDataUrl ? (
+        <div className="empty-result">答案画像があると赤ペン表示できます。</div>
+      ) : (
+        <div className="redpen-stage">
+          <img src={answerImageDataUrl} alt="赤ペン表示対象の答案" />
+          {positionedAnnotations.map((annotation, index) => (
+            <span
+              className={`redpen-mark ${annotation.type || 'mistake'}`}
+              key={annotation.id || `${annotation.message || 'annotation'}-${index}`}
+              style={{
+                left: `${Number(annotation.x) * 100}%`,
+                top: `${Number(annotation.y) * 100}%`,
+                width: `${Number(annotation.width) * 100}%`,
+                height: `${Number(annotation.height) * 100}%`,
+              }}
+              title={annotation.message || '注釈'}
+            >
+              <span>{annotation.message || '確認'}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      <section className="annotation-list">
+        <h3>注釈一覧</h3>
+        {annotations.length ? (
+          <ul>
+            {annotations.map((annotation, index) => (
+              <li key={annotation.id || `${annotation.message || 'annotation-list'}-${index}`}>
+                <strong>{annotation.type || 'note'}:</strong> {annotation.message || '注釈'}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="meta-text">採点後にAIの注釈が表示されます。</p>
+        )}
+      </section>
     </section>
   );
 }
@@ -642,6 +870,12 @@ function GradingPanel({ result, status, rawText }) {
             <h3>改善案</h3>
             <ul>{(result.improvements || []).map((item) => <li key={item}>{item}</li>)}</ul>
           </section>
+          {result.mistakeCategories?.length > 0 && (
+            <section>
+              <h3>ミス分類</h3>
+              <ul>{result.mistakeCategories.map((item) => <li key={item}>{item}</li>)}</ul>
+            </section>
+          )}
           <p className="meta-text">信頼度: {result.confidence || 'unknown'}</p>
         </div>
       )}
@@ -681,6 +915,34 @@ function HistoryList({ records, onLoad, onDelete }) {
   );
 }
 
+function MistakeInsights({ records }) {
+  const categories = useMemo(() => {
+    const counts = new Map();
+    records.forEach((record) => {
+      const items = record.mistakeCategories || record.gradingResult?.mistakeCategories || [];
+      items.forEach((item) => counts.set(item, (counts.get(item) || 0) + 1));
+    });
+    return [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 6);
+  }, [records]);
+
+  return (
+    <section className="history-section insights-section">
+      <h2>ミス分析</h2>
+      {categories.length ? (
+        <div className="insight-list">
+          {categories.map(([category, count]) => (
+            <span className="insight-chip" key={category}>
+              {category} <strong>{count}</strong>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="meta-text">採点を重ねると、よく出るミス分類が表示されます。</p>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [draft, setDraft] = useState(emptyDraft);
   const [inputView, setInputView] = useState('answer');
@@ -697,7 +959,8 @@ function App() {
   const usageDate = getUsageDate();
 
   const loadRecords = useCallback(async () => {
-    setRecords(await getAllRecords());
+    const storedRecords = await getAllRecords();
+    setRecords(storedRecords.map(normalizeRecord));
   }, []);
 
   const loadUsage = useCallback(async () => {
@@ -738,12 +1001,16 @@ function App() {
     return canvas ? canvas.toDataURL('image/png') : '';
   };
 
+  const getCurrentAnswerImageDataUrl = () =>
+    draft.answerInputSource === 'uploadedImage' ? draft.uploadedAnswerImageDataUrl : exportCanvasImage();
+
   const persistRecord = async (recordPatch = {}) => {
     const now = new Date().toISOString();
+    const answerImageDataUrl = recordPatch.answerImageDataUrl || getCurrentAnswerImageDataUrl();
     const record = {
       ...draft,
       ...recordPatch,
-      answerImageDataUrl: exportCanvasImage(),
+      answerImageDataUrl,
       title: draft.title.trim(),
       updatedAt: now,
     };
@@ -784,7 +1051,10 @@ function App() {
     if (!draft.modelAnswer.trim() && !draft.modelAnswerImageDataUrl) {
       return '模範解答または模範解答画像を入力してください。';
     }
-    if (!draft.strokes.length) {
+    if (draft.answerInputSource === 'uploadedImage' && !draft.uploadedAnswerImageDataUrl) {
+      return '答案画像を選択してください。';
+    }
+    if (draft.answerInputSource === 'canvas' && !draft.strokes.length) {
       return '答案を手書きしてください。';
     }
     const used = usage?.successfulRequests || 0;
@@ -792,6 +1062,75 @@ function App() {
       return '採点をキャンセルしました。';
     }
     return '';
+  };
+
+  const buildGradePayload = (mode, answerImageDataUrl) => ({
+    mode,
+    questionText: draft.questionText,
+    questionImage: imageDataUrlToPayload(draft.questionImageDataUrl),
+    modelAnswer: draft.modelAnswer,
+    modelAnswerImage: imageDataUrlToPayload(draft.modelAnswerImageDataUrl),
+    rubricText: draft.rubricText,
+    maxScore: Number(draft.maxScore) || 10,
+    answerImage: imageDataUrlToPayload(answerImageDataUrl),
+    gradingStrictness: draft.gradingStrictness,
+    correctedQuestion: draft.userCorrectedQuestion || draft.recognizedQuestionDraft,
+    correctedAnswer: draft.userCorrectedAnswer || draft.recognizedAnswerDraft,
+    correctedLatex: draft.userCorrectedLatex || draft.recognizedLatexDraft,
+  });
+
+  const requestGemini = async (payload) => {
+    const response = await fetch('/api/grade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const body = await response.json();
+
+    if (!response.ok) {
+      if (response.status === 429) await incrementUsage('failedRequests');
+      throw new Error(body.error || 'Gemini APIで処理に失敗しました。');
+    }
+
+    setRawText(body.rawText || '');
+    await incrementUsage('successfulRequests');
+    return body;
+  };
+
+  const applyRecognitionResult = (result) => {
+    const patch = {
+      recognizedQuestionDraft: result.recognizedQuestion || '',
+      recognizedAnswerDraft: result.recognizedAnswer || '',
+      recognizedLatexDraft: result.recognizedLatex || '',
+      userCorrectedQuestion: result.recognizedQuestion || '',
+      userCorrectedAnswer: result.recognizedAnswer || '',
+      userCorrectedLatex: result.recognizedLatex || '',
+    };
+    updateDraft(patch);
+    return patch;
+  };
+
+  const recognize = async () => {
+    setRawText('');
+    const validation = validateBeforeGrade();
+    if (validation) {
+      setStatus(validation);
+      return;
+    }
+
+    setStatus('Geminiでテキスト化中です...');
+    const answerImageDataUrl = getCurrentAnswerImageDataUrl();
+
+    try {
+      const body = await requestGemini(buildGradePayload('recognize', answerImageDataUrl));
+      const recognitionPatch = applyRecognitionResult(body.result || {});
+      await persistRecord({ ...recognitionPatch, answerImageDataUrl });
+      setInputView('recognition');
+      setStatus('テキスト化しました。必要なら修正して採点できます。');
+    } catch (error) {
+      setStatus(error.message);
+    }
   };
 
   const grade = async () => {
@@ -803,34 +1142,55 @@ function App() {
     }
 
     setStatus('Geminiで採点中です...');
-    const answerImageDataUrl = exportCanvasImage();
+    const answerImageDataUrl = getCurrentAnswerImageDataUrl();
 
     try {
-      const response = await fetch('/api/grade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          questionText: draft.questionText,
-          questionImage: imageDataUrlToPayload(draft.questionImageDataUrl),
-          modelAnswer: draft.modelAnswer,
-          modelAnswerImage: imageDataUrlToPayload(draft.modelAnswerImageDataUrl),
-          rubricText: draft.rubricText,
-          maxScore: Number(draft.maxScore) || 10,
-          answerImage: imageDataUrlToPayload(answerImageDataUrl),
-        }),
-      });
-
-      const body = await response.json();
-
-      if (!response.ok) {
-        if (response.status === 429) await incrementUsage('failedRequests');
-        throw new Error(body.error || '採点に失敗しました。');
-      }
-
-      setRawText(body.rawText || '');
-      await incrementUsage('successfulRequests');
-      await persistRecord({ answerImageDataUrl, gradingResult: body.result });
+      const body = await requestGemini(buildGradePayload('full', answerImageDataUrl));
+      const result = body.result || {};
+      const recordPatch = {
+        answerImageDataUrl,
+        gradingResult: result,
+        recognizedQuestionDraft: result.recognizedQuestion || '',
+        recognizedAnswerDraft: result.recognizedAnswer || '',
+        recognizedLatexDraft: result.recognizedLatex || '',
+        userCorrectedQuestion: result.recognizedQuestion || '',
+        userCorrectedAnswer: result.recognizedAnswer || '',
+        userCorrectedLatex: result.recognizedLatex || '',
+        annotations: result.annotations || [],
+        mistakeCategories: result.mistakeCategories || [],
+      };
+      await persistRecord(recordPatch);
       setStatus('採点しました。');
+    } catch (error) {
+      setStatus(error.message);
+    }
+  };
+
+  const gradeCorrected = async () => {
+    setRawText('');
+    const validation = validateBeforeGrade();
+    if (validation) {
+      setStatus(validation);
+      return;
+    }
+    if (!draft.userCorrectedAnswer.trim() && !draft.recognizedAnswerDraft.trim()) {
+      setStatus('先にテキスト化するか、読み取り答案を入力してください。');
+      return;
+    }
+
+    setStatus('修正済みの読み取り内容で採点中です...');
+    const answerImageDataUrl = getCurrentAnswerImageDataUrl();
+
+    try {
+      const body = await requestGemini(buildGradePayload('grade', answerImageDataUrl));
+      const result = body.result || {};
+      await persistRecord({
+        answerImageDataUrl,
+        gradingResult: result,
+        annotations: result.annotations || [],
+        mistakeCategories: result.mistakeCategories || [],
+      });
+      setStatus('修正内容で採点しました。');
     } catch (error) {
       setStatus(error.message);
     }
@@ -869,6 +1229,9 @@ function App() {
           <button type="button" onClick={saveCurrent}>
             保存
           </button>
+          <button type="button" onClick={recognize}>
+            テキスト化
+          </button>
           <button className="primary-button" type="button" onClick={grade}>
             採点する
           </button>
@@ -892,13 +1255,41 @@ function App() {
             >
               問題・模範解答
             </button>
+            <button
+              className={inputView === 'recognition' ? 'active-tab' : ''}
+              type="button"
+              onClick={() => setInputView('recognition')}
+            >
+              認識結果
+            </button>
+            <button
+              className={inputView === 'redpen' ? 'active-tab' : ''}
+              type="button"
+              onClick={() => setInputView('redpen')}
+            >
+              赤ペン
+            </button>
           </div>
           {inputView === 'question' ? (
             <QuestionPanel draft={draft} updateDraft={updateDraft} />
+          ) : inputView === 'recognition' ? (
+            <RecognitionPanel
+              draft={draft}
+              updateDraft={updateDraft}
+              onRecognize={recognize}
+              onGradeCorrected={gradeCorrected}
+              status={status}
+            />
+          ) : inputView === 'redpen' ? (
+            <RedPenPanel
+              answerImageDataUrl={draft.answerImageDataUrl || getCurrentAnswerImageDataUrl()}
+              annotations={draft.annotations || draft.gradingResult?.annotations || []}
+            />
           ) : (
             <AnswerPanel
               draft={draft}
               setDraft={setDraft}
+              updateDraft={updateDraft}
               tool={tool}
               setTool={setTool}
               penSize={penSize}
@@ -912,7 +1303,8 @@ function App() {
         <GradingPanel result={draft.gradingResult} status={status} rawText={rawText} />
       </section>
 
-      <HistoryList records={records} onLoad={setDraft} onDelete={deleteExistingRecord} />
+      <MistakeInsights records={records} />
+      <HistoryList records={records} onLoad={(record) => setDraft(normalizeRecord(record))} onDelete={deleteExistingRecord} />
     </main>
   );
 }
